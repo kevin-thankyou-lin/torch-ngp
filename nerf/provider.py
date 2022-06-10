@@ -25,6 +25,34 @@ def nerf_matrix_to_ngp(pose, scale=0.33):
     ], dtype=np.float32)
     return new_pose
 
+def nerf_ray_to_ngp(rays_o, rays_d, scale=0.33):
+    rays_o = rays_o * scale
+
+    tmp = rays_o[0]
+    rays_o[0] = rays_o[1]
+    rays_o[1] = rays_o[2]
+    rays_o[2] = tmp
+
+    tmp = rays_d[0]
+    rays_d[0] = rays_d[1]
+    rays_d[1] = rays_d[2]
+    rays_d[2] = tmp
+    return rays_o, rays_d
+
+def ngp_ray_to_nerf(rays_o, rays_d, scale=0.33):
+    rays_o = rays_o / scale
+
+    # convert yzx to xyz
+    tmp = rays_o.detach().clone()
+    rays_o[..., 0] = tmp[..., 2]
+    rays_o[..., 1] = tmp[..., 0]
+    rays_o[..., 2] = tmp[..., 1]
+
+    tmp = rays_d.detach().clone()
+    rays_d[..., 0] = tmp[..., 2]
+    rays_d[..., 1] = tmp[..., 0]
+    rays_d[..., 2] = tmp[..., 1]
+    return rays_o, rays_d
 
 def visualize_poses(poses, size=0.1):
     # poses: [B, 4, 4]
@@ -179,9 +207,9 @@ class NeRFDataset:
                 elif type == 'val':
                     frames = frames[:1]
                 # else 'all' or 'trainval' : use all frames
-            if self.mode == 'blender':
-                if type == 'train' or type == 'eval_train':
-                    frames = frames[::3]
+            # if self.mode == 'blender':
+            #     if type == 'train' or type == 'eval_train':
+            #         frames = frames[::10]
             
             self.poses = []
             self.images = []
