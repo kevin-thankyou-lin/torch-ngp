@@ -14,6 +14,7 @@ from datetime import datetime
 
 import cv2
 import matplotlib.pyplot as plt
+import wandb
 
 import torch
 import torch.nn as nn
@@ -29,6 +30,13 @@ from torch_ema import ExponentialMovingAverage
 
 from packaging import version as pver
 
+
+def cond_mkdir(dir_path):
+    if not os.path.exists(dir_path):
+        print(f"Creating new directory {dir_path}")
+        os.makedirs(dir_path)
+
+        
 def custom_meshgrid(*args):
     # ref: https://pytorch.org/docs/stable/generated/torch.meshgrid.html?highlight=meshgrid#torch.meshgrid
     if pver.parse(torch.__version__) < pver.parse('1.10'):
@@ -180,10 +188,51 @@ def extract_geometry(bound_min, bound_max, resolution, threshold, query_func):
     return vertices, triangles
 
 
+class DistanceLossMeter:
+    def __init__(self):
+        self.V = 0
+        self.N = 0
+        self.name = 'distance_percentage_error'
+
+    def clear(self):
+        self.V = 0
+        self.N = 0
+
+    def update(self, 
+        pred_ray_lengths: np.ndarray, 
+        gt_ray_lengths: np.ndarray, 
+        gt_ray_weights: np.ndarray
+    ):
+        """
+        Computes the mean percentage ray distance error
+        :params:
+            pred_ray_lengths: [B, H, W] predicted ray lengths (distance map instead of depth map)
+            gt_ray_lengths: [B, H, W]
+            gt_ray_weights: [B, H, W]  (weights should be 0 for invalid rays)
+            H, W might not be the same as the input image size.
+        """
+        gt_lengths_valid = gt_ray_lengths[torch.where(gt_ray_weights != 0)]
+        pred_lengths_valid = pred_ray_lengths[torch.where(gt_ray_weights != 0)]
+        percentage_errors = torch.abs(pred_lengths_valid - gt_lengths_valid) / gt_lengths_valid
+
+        self.V += percentage_errors.sum().item()
+        self.N += len(percentage_errors)
+
+    def measure(self):
+        return self.V / self.N
+
+    def write(self, writer, global_step, prefix=""):
+        writer.add_scalar(os.path.join(prefix, "Distance Loss"), self.measure(), global_step)
+
+    def report(self):
+        return f'Distance Loss = {self.measure():.6f}'
+
+
 class PSNRMeter:
     def __init__(self):
         self.V = 0
         self.N = 0
+        self.name = 'psnr'
 
     def clear(self):
         self.V = 0
@@ -217,6 +266,59 @@ class PSNRMeter:
         return f'PSNR = {self.measure():.6f}'
 
 
+def plot_distributions(
+    dataset: list,
+    xticklabels,
+    title: str = "",
+    save_dir: str = "violin_plots",
+    x_label: str = "Training steps: red = training view; blue = validation view",
+    y_label: str = "RGB losses",
+) -> plt.Figure:
+    """
+    Visualizes a list of lists as well as a list of xtick labels in a single matplotlib violin plot
+
+    :params:
+        dataset: nested list elements are plotted vertically
+        xticklabels: list of xtick labels
+        title: title of the plot and used for file name
+        save_dir: directory to save the plot to
+    """
+    fig, (axes) = plt.subplots(nrows=1, ncols=1)
+    xticks = list([i for i in range(1, len(xticklabels) + 1)])
+    xticklabels = xticklabels
+    parts = axes.violinplot(
+        dataset, showmedians=True, showextrema=False
+    )  # , quantiles=[9, 9, 9])
+
+    for i, pc in enumerate(parts["bodies"]):
+        if i % 2 == 0:
+            pc.set_facecolor("#D43F3A")
+            pc.set_alpha(0.6)
+
+    axes.set_xticks(xticks)
+    axes.set_xticklabels(xticklabels)
+
+    scatter_xs = [
+        len(uncertainties) * [i + 1] for i, uncertainties in enumerate(dataset)
+    ]
+    axes.scatter(
+        np.concatenate(scatter_xs),
+        np.concatenate(dataset),
+        color="k",
+        marker="_",
+        zorder=3,
+    )
+
+    plt.title(title)
+    axes.set_xlabel(x_label)
+    axes.set_ylabel(y_label)
+    filenames = "".join([label.split("\n")[0] for label in xticklabels][::2])
+    plt.tight_layout()
+    cond_mkdir(save_dir)
+    print(f"Saving to: {save_dir}/{title}.png")
+    plt.savefig(f"{save_dir}/{title}.png")
+    return fig
+
 class Trainer(object):
     def __init__(self, 
                  name, # name of this experiment
@@ -241,6 +343,10 @@ class Trainer(object):
                  use_checkpoint="latest", # which ckpt to use at init time
                  use_tensorboardX=True, # whether to use tensorboard for logging
                  scheduler_update_every_step=False, # whether to call scheduler.step() after every train step
+                 use_depth_supervision=False, # whether to use depth supervision
+                 depth_lambda=None, # depth supervision lambda
+                 save_max_epoch_only: bool = False, # whether to save the final model only
+                 error_map_weight: float = 0.1, # weight of error map in loss
                  ):
         
         self.name = name
@@ -290,6 +396,10 @@ class Trainer(object):
             self.ema = None
 
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.fp16)
+        self.use_depth_supervision = use_depth_supervision
+        self.depth_lambda = depth_lambda
+        self.save_max_epoch_only = save_max_epoch_only
+        self.error_map_weight = error_map_weight
 
         # variable init
         self.epoch = 1
@@ -434,18 +544,51 @@ class Trainer(object):
             error = loss.detach().to(error_map.device) # [B, N], already in [0, 1]
             
             # ema update
-            ema_error = 0.1 * error_map.gather(1, inds) + 0.9 * error
+            ema_error = self.error_map_weight * error_map.gather(1, inds) + (1 - self.error_map_weight) * error
             error_map.scatter_(1, inds, ema_error)
 
             # put back
             self.error_map[index] = error_map
-
+            
         loss = loss.mean()
+        loss_dct = {
+            "rgb_loss": loss.item(),
+        }
 
-        return pred_rgb, gt_rgb, loss
+        if self.use_depth_supervision:	
+            pred_ray_lengths = outputs['unnormed_expected_depth']	
+            inds = data['inds']	
+            gt_ray_lengths = data["ray_lengths"].flatten()[inds].flatten()	
+            gt_ray_weights = data["ray_weights"].flatten()[inds].flatten()	
+            loss_depth = self.criterion(pred_ray_lengths * gt_ray_weights, gt_ray_lengths * gt_ray_weights).mean(-1)
+            loss += self.depth_lambda * loss_depth
+            import ipdb; ipdb.set_trace()
+            print(f"KL check loss depth shapes")
+            loss_dct["depth_loss"] = loss_depth.mean().item()
 
-    def eval_step(self, data):
+        return pred_rgb, gt_rgb, loss, loss_dct
 
+    def downsample_data(self, data, downsample_factor=8, include_distances=False):
+        B, H, W, C = data['images'].shape
+        if C == 4:
+            C = 3
+
+        data['rays_o'] = data['rays_o'].reshape(B, H, W, C)
+        data['rays_d'] = data['rays_d'].reshape(B, H, W, C)
+
+        data['rays_o'] = data['rays_o'][:, ::downsample_factor, ::downsample_factor, :]
+        data['rays_d'] = data['rays_d'][:, ::downsample_factor, ::downsample_factor, :]
+        data['images'] = data['images'][:, ::downsample_factor, ::downsample_factor]
+
+        data['rays_o'] = data['rays_o'].reshape(B, -1, C)
+        data['rays_d'] = data['rays_d'].reshape(B, -1, C)
+        
+        if include_distances:
+            data["ray_lengths"] = data["ray_lengths"][:, ::downsample_factor, ::downsample_factor]
+            data["ray_weights"] = data["ray_weights"][:, ::downsample_factor, ::downsample_factor]
+        
+    def eval_step(self, data, include_distances=False):
+        self.downsample_data(data, downsample_factor=8, include_distances=include_distances)
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
         images = data['images'] # [B, H, W, 3/4]
@@ -468,7 +611,11 @@ class Trainer(object):
 
         loss = self.criterion(pred_rgb, gt_rgb).mean()
 
-        return pred_rgb, pred_depth, gt_rgb, loss
+        loss = self.criterion(pred_rgb, gt_rgb).mean()
+        loss_dct = {
+            "rgb_loss": loss.item(),
+        }
+        return pred_rgb, pred_depth, gt_rgb, loss, loss_dct
 
     # moved out bg_color and perturb for more flexible control...
     def test_step(self, data, bg_color=None, perturb=False):  
@@ -512,13 +659,18 @@ class Trainer(object):
 
     ### ------------------------------
 
-    def train(self, train_loader, valid_loader, max_epochs):
+    def train(self, train_loader, valid_loader, max_epochs, start_epoch=None, eval_train_loader=None, use_wandb=False):
+        dataset, xticklabels = [], []
+        wandb_dct = {}
         if self.use_tensorboardX and self.local_rank == 0:
             self.writer = tensorboardX.SummaryWriter(os.path.join(self.workspace, "run", self.name))
 
         # mark untrained region (i.e., not covered by any camera from the training dataset)
         if self.model.cuda_ray:
             self.model.mark_untrained_grid(train_loader._data.poses, train_loader._data.intrinsics)
+
+        if start_epoch is not None:	
+            self.epoch = start_epoch
 
         # get a ref to error_map
         self.error_map = train_loader._data.error_map
@@ -529,18 +681,54 @@ class Trainer(object):
             self.train_one_epoch(train_loader)
 
             if self.workspace is not None and self.local_rank == 0:
-                self.save_checkpoint(full=True, best=False)
+                if not self.save_max_epoch_only and self.epoch % 5 == 0:	
+                    self.save_checkpoint(full=True, best=False, train_loader_size=len(train_loader))	
+                elif self.save_max_epoch_only and epoch == max_epochs:	
+                    self.save_checkpoint(full=True, best=False, train_loader_size=len(train_loader))
 
-            if self.epoch % self.eval_interval == 0:
-                self.evaluate_one_epoch(valid_loader)
-                self.save_checkpoint(full=False, best=True)
+            if self.epoch % self.eval_interval == 0 and self.epoch > 0:
+                if eval_train_loader is not None:
+                    metrics, loss_dct = self.evaluate_one_epoch(eval_train_loader, save_dir='trainset_validation')
+                    dataset.append(loss_dct["rgb_loss"])
+                    wandb_dct["max_trainset_rgb_loss"] = max(loss_dct["rgb_loss"])
+                    for key, value in metrics.items():
+                        wandb_dct[f"trainset_{key}"] = value
+
+                metrics, loss_dct = self.evaluate_one_epoch(valid_loader, save_dir='valset_validation')
+                dataset.append(loss_dct["rgb_loss"])
+                wandb_dct["max_valset_rgb_loss"] = max(loss_dct["rgb_loss"])
+                for key, value in metrics.items():
+                    wandb_dct[f"valset_{key}"] = value
+
+                if len(xticklabels) % 4 == 0:
+                    xticklabels.extend([f'{self.global_step}', f''])
+                else:
+                    xticklabels.extend([f'', f''])
+
+                if eval_train_loader is not None:
+                    # assumes dataset[-1] is valset loss and dataset[-2] is trainset loss
+                    max_val_loss = max(dataset[-1])
+                    max_train_loss = max(dataset[-2])
+                    wandb_dct["max_val_loss ÷ max_train_loss"] = max_val_loss / max_train_loss
+
+            if epoch % 50 == 0 and epoch > 0:
+                if eval_train_loader is None:
+                    real_xticklabels = xticklabels[::2]
+                else:
+                    real_xticklabels = xticklabels
+                title = f"RGB loss vs train steps\n{self.workspace}\ntrainsize{len(train_loader)}"
+                fig = plot_distributions(dataset, title=title, xticklabels=real_xticklabels) #, l1_reg=self.opt.l1_reg_weight)
+                wandb_dct["RGB loss vs train steps"] = wandb.Image(fig)
+
+            if use_wandb:
+                wandb.log(wandb_dct, step=self.global_step)
 
         if self.use_tensorboardX and self.local_rank == 0:
             self.writer.close()
 
-    def evaluate(self, loader, name=None):
+    def evaluate(self, loader):
         self.use_tensorboardX, use_tensorboardX = False, self.use_tensorboardX
-        self.evaluate_one_epoch(loader, name)
+        metrics, loss_dct = self.evaluate_one_epoch(loader)
         self.use_tensorboardX = use_tensorboardX
 
     def test(self, loader, save_path=None, name=None):
@@ -735,7 +923,7 @@ class Trainer(object):
             self.optimizer.zero_grad()
 
             with torch.cuda.amp.autocast(enabled=self.fp16):
-                preds, truths, loss = self.train_step(data)
+                preds, truths, loss, loss_dct = self.train_step(data)
          
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
@@ -786,8 +974,10 @@ class Trainer(object):
         self.log(f"==> Finished Epoch {self.epoch}.")
 
 
-    def evaluate_one_epoch(self, loader, name=None):
+    def evaluate_one_epoch(self, loader, name=None, save_dir='valset_validation'):
         self.log(f"++> Evaluate at epoch {self.epoch} ...")
+        from collections import defaultdict
+        overall_loss_dct = defaultdict(list)
 
         if name is None:
             name = f'{self.name}_ep{self.epoch:04d}'
@@ -817,8 +1007,15 @@ class Trainer(object):
             for data in loader:    
                 self.local_step += 1
 
-                with torch.cuda.amp.autocast(enabled=self.fp16):
-                    preds, preds_depth, truths, loss = self.eval_step(data)
+                if "distance_percentage_error" in [metric.name for metric in self.metrics]:
+                    with torch.cuda.amp.autocast(enabled=self.fp16):
+                        preds, preds_depth, truths, loss, loss_dct, pred_ray_lengths, gt_ray_lengths, gt_ray_weights = self.eval_step(data, include_distances=True)
+                else:
+                    with torch.cuda.amp.autocast(enabled=self.fp16):
+                        preds, preds_depth, truths, loss, loss_dct = self.eval_step(data)
+
+                for key, val in loss_dct.items():
+                    overall_loss_dct[key].append(val)
 
                 # all_gather/reduce the statistics (NCCL only support all_*)
                 if self.world_size > 1:
@@ -844,11 +1041,14 @@ class Trainer(object):
                 if self.local_rank == 0:
 
                     for metric in self.metrics:
-                        metric.update(preds, truths)
+                        if metric.name == 'distance_percentage_error':
+                            metric.update(pred_ray_lengths, gt_ray_lengths, gt_ray_weights)
+                        else:
+                            metric.update(preds, truths)
 
                     # save image
-                    save_path = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}.png')
-                    save_path_depth = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_depth.png')
+                    save_path = os.path.join(self.workspace, save_dir, f'{name}_{self.local_step:04d}.png')
+                    save_path_depth = os.path.join(self.workspace, save_dir, f'{name}_{self.local_step:04d}_depth.png')
                     #save_path_gt = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_gt.png')
 
                     #self.log(f"==> Saving validation image to {save_path}")
@@ -871,6 +1071,7 @@ class Trainer(object):
         average_loss = total_loss / self.local_step
         self.stats["valid_loss"].append(average_loss)
 
+        metrics = {}
         if self.local_rank == 0:
             pbar.close()
             if not self.use_loss_as_metric and len(self.metrics) > 0:
@@ -880,6 +1081,7 @@ class Trainer(object):
                 self.stats["results"].append(average_loss) # if no metric, choose best by min loss
 
             for metric in self.metrics:
+                metrics[metric.name] = metric.measure()
                 self.log(metric.report(), style="blue")
                 if self.use_tensorboardX:
                     metric.write(self.writer, self.epoch, prefix="evaluate")
@@ -889,8 +1091,10 @@ class Trainer(object):
             self.ema.restore()
 
         self.log(f"++> Evaluate epoch {self.epoch} Finished.")
+        return metrics, overall_loss_dct
 
-    def save_checkpoint(self, name=None, full=False, best=False, remove_old=True):
+
+    def save_checkpoint(self, name=None, full=False, best=False, remove_old=True, train_loader_size=-1):
 
         if name is None:
             name = f'{self.name}_ep{self.epoch:04d}'
@@ -916,7 +1120,7 @@ class Trainer(object):
 
             state['model'] = self.model.state_dict()
 
-            file_path = f"{self.ckpt_path}/{name}.pth"
+            file_path = f"{self.ckpt_path}/{self.name}_trainsize_{train_loader_size}_ep{self.epoch:04d}.pth.tar"
 
             if remove_old:
                 self.stats["checkpoints"].append(file_path)
@@ -944,19 +1148,25 @@ class Trainer(object):
                     if self.ema is not None:
                         self.ema.restore()
                     
-                    torch.save(state, self.best_path)
+                    file_path = f"{self.ckpt_path}/{self.name}_trainsize{train_loader_size}_ep{self.epoch:04d}.pth.tar"	
+                    torch.save(state, self.best_path)	
+                    torch.save(state, file_path)
             else:
                 self.log(f"[WARN] no evaluated results found, skip saving best checkpoint.")
             
-    def load_checkpoint(self, checkpoint=None, model_only=False):
-        if checkpoint is None:
-            checkpoint_list = sorted(glob.glob(f'{self.ckpt_path}/{self.name}_ep*.pth'))
-            if checkpoint_list:
-                checkpoint = checkpoint_list[-1]
-                self.log(f"[INFO] Latest checkpoint is {checkpoint}")
-            else:
+    def load_checkpoint(self, checkpoint=None, model_only=False, train_size: int = None):	
+        if checkpoint is None:	
+            checkpoint_list = sorted(glob.glob(f'{self.ckpt_path}/{self.name}_ep*.pth.tar'))	
+            if checkpoint_list:	
+                if train_size is not None:	
+                    checkpoint = checkpoint_list[-1]	
+                    self.log(f"[INFO] Latest checkpoint is {checkpoint}")	
+                else:	
+                    import ipdb; ipdb.set_trace()	
+                    # get checkpoint with train_size	
+                    	
+            else:	
                 self.log("[WARN] No checkpoint found, model randomly initialized.")
-                return
 
         checkpoint_dict = torch.load(checkpoint, map_location=self.device)
         

@@ -1,5 +1,6 @@
 import torch
 import argparse
+import wandb
 
 from nerf.provider import NeRFDataset
 from nerf.gui import NeRFGUI
@@ -7,6 +8,7 @@ from nerf.utils import *
 
 from functools import partial
 from loss import huber_loss
+
 
 #torch.autograd.set_detect_anomaly(True)
 
@@ -28,6 +30,10 @@ if __name__ == '__main__':
     parser.add_argument('--num_steps', type=int, default=512, help="num steps sampled per ray (only valid when not using --cuda_ray)")
     parser.add_argument('--upsample_steps', type=int, default=0, help="num steps up-sampled per ray (only valid when not using --cuda_ray)")
     parser.add_argument('--max_ray_batch', type=int, default=4096, help="batch size of rays at inference to avoid OOM (only valid when not using --cuda_ray)")
+    parser.add_argument('--scheduler', type=str, choices=['LambdaLR', 'ReduceLROnPlateau'], default='LambdaLR', help="use error map to sample rays")
+    parser.add_argument('--reduce_lr_patience', type=int, default=10, help="patience value for ReduceLROnPlateau scheduler")
+    parser.add_argument('--reduce_lr_factor', type=float, default=0.9, help="factor value for ReduceLROnPlateau scheduler")
+    parser.add_argument('--max_epoch', type=int, default=100, help="max epochs for training")
 
     ### network backbone options
     parser.add_argument('--fp16', action='store_true', help="use amp mixed precision training")
@@ -58,6 +64,8 @@ if __name__ == '__main__':
     parser.add_argument('--error_map', action='store_true', help="use error map to sample rays")
     parser.add_argument('--clip_text', type=str, default='', help="text input for CLIP guidance")
     parser.add_argument('--rand_pose', type=int, default=-1, help="<0 uses no rand pose, =0 only uses rand pose, >0 sample one rand pose every $ known poses")
+    parser.add_argument('--use_wandb', '-w', action='store_true', help="use error map to sample rays")
+    parser.add_argument('--error_map_weight', type=float, default=0.1, help="weight for current error value in error map")
 
     opt = parser.parse_args()
 
@@ -101,7 +109,7 @@ if __name__ == '__main__':
     
     if opt.test:
 
-        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, fp16=opt.fp16, metrics=[PSNRMeter()], use_checkpoint=opt.ckpt)
+        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, fp16=opt.fp16, metrics=[PSNRMeter()], use_checkpoint=opt.ckpt, err_map_weight=opt.error_map_weight)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer)
@@ -121,12 +129,38 @@ if __name__ == '__main__':
 
         optimizer = lambda model: torch.optim.Adam(model.get_params(opt.lr), betas=(0.9, 0.99), eps=1e-15)
 
-        train_loader = NeRFDataset(opt, device=device, type='trainval').dataloader()
+        train_loader = NeRFDataset(opt, device=device, type='train').dataloader()
+
+        if opt.use_wandb:
+            import wandb
+            name = f"ngp-dtgamma{opt.dt_gamma}-{opt.scheduler}-trainsize{len(train_loader)}"
+            if opt.scheduler == 'ReduceLROnPlateau':
+                name += f"-patience{opt.reduce_lr_patience}-redlrfactor{opt.reduce_lr_factor}"
+            if opt.error_map:
+                name += "-errmap"
+                name += f"-errmap_weight{opt.error_map_weight}"
+                
+            run = (
+                wandb.init(
+                    project="torch-ngp",
+                    name=name,
+                    config=opt,
+                ),
+            )
+
+            wandb.run.log_code(".")
 
         # decay to 0.1 * init_lr at last iter step
-        scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
+        if opt.scheduler == 'LambdaLR':
+            scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
+            scheduler_update_every_step = True
+        elif opt.scheduler == 'ReduceLROnPlateau':
+            scheduler = lambda optimizer: optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=opt.reduce_lr_patience, factor=opt.reduce_lr_factor)
+            scheduler_update_every_step = False
+        else:
+            raise ValueError(f"unknown scheduler {opt.scheduler}")
 
-        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=True, metrics=[PSNRMeter()], use_checkpoint=opt.ckpt, eval_interval=50)
+        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=scheduler_update_every_step, metrics=[PSNRMeter()], use_checkpoint=opt.ckpt, eval_interval=20)
 
         if opt.gui:
             trainer.train_loader = train_loader # attach dataloader to trainer
@@ -135,10 +169,12 @@ if __name__ == '__main__':
             gui.render()
         
         else:
+            eval_train_loader = NeRFDataset(opt, device=device, type='eval_train', downscale=1).dataloader()
             valid_loader = NeRFDataset(opt, device=device, type='val', downscale=1).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
-            trainer.train(train_loader, valid_loader, max_epoch)
+            max_epoch = min(max_epoch, opt.max_epoch)
+            trainer.train(train_loader, valid_loader, max_epoch, eval_train_loader=eval_train_loader, use_wandb=opt.use_wandb)
 
             # also test
             test_loader = NeRFDataset(opt, device=device, type='test').dataloader()

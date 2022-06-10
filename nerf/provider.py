@@ -128,6 +128,10 @@ class NeRFDataset:
                 with open(os.path.join(self.root_path, f'transforms_val.json'), 'r') as f:
                     transform_val = json.load(f)
                 transform['frames'].extend(transform_val['frames'])
+            # eval_train loads train split
+            elif type == 'eval_train':
+                with open(os.path.join(self.root_path, f'transforms_train.json'), 'r') as f:
+                    transform = json.load(f)
             # only load one specified split
             else:
                 with open(os.path.join(self.root_path, f'transforms_{type}.json'), 'r') as f:
@@ -175,6 +179,9 @@ class NeRFDataset:
                 elif type == 'val':
                     frames = frames[:1]
                 # else 'all' or 'trainval' : use all frames
+            if self.mode == 'blender':
+                if type == 'train' or type == 'eval_train':
+                    frames = frames[::3]
             
             self.poses = []
             self.images = []
