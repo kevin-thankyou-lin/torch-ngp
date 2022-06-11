@@ -714,6 +714,12 @@ class Trainer(object):
                     max_train_loss = max(dataset[-2])
                     wandb_dct[f"view_count_{len(train_loader)}/max_val_loss ÷ max_train_loss"] = max_val_loss / max_train_loss
 
+                if use_wandb:
+                    if self.epoch != max_epoch:
+                        wandb.log(wandb_dct, step=self.global_step)
+                    else:
+                        print(f"[INFO] Accumulate Wandb metrics with violin plot...")
+                        
             if epoch == max_epoch:
                 if eval_train_loader is None:
                     real_xticklabels = xticklabels[::2]
@@ -723,9 +729,9 @@ class Trainer(object):
                 title = f"RGB loss vs train steps\n{workspace_title}\ntrainsize{len(train_loader)}"
                 fig = plot_distributions(dataset, title=title, xticklabels=real_xticklabels) #, l1_reg=self.opt.l1_reg_weight)
                 wandb_dct[f"view_count_{len(train_loader)}/RGB loss vs train steps"] = wandb.Image(fig)
-
-            if use_wandb:
-                wandb.log(wandb_dct, step=self.global_step)
+            
+                if use_wandb:
+                    wandb.log(wandb_dct, step=self.global_step)
 
         if self.use_tensorboardX and self.local_rank == 0:
             self.writer.close()
