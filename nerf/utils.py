@@ -312,9 +312,12 @@ def plot_distributions(
     plt.title(title)
     axes.set_xlabel(x_label)
     axes.set_ylabel(y_label)
+
     filenames = "".join([label.split("\n")[0] for label in xticklabels][::2])
+    title = "".join(title.split("\n"))
     plt.tight_layout()
     cond_mkdir(save_dir)
+
     print(f"Saving to: {save_dir}/{title}.png")
     plt.savefig(f"{save_dir}/{title}.png")
     return fig
@@ -542,7 +545,7 @@ class Trainer(object):
             #     cv2.imwrite(os.path.join(self.workspace, f'{self.global_step}.jpg'), (tmp * 255).astype(np.uint8))
 
             error = loss.detach().to(error_map.device) # [B, N], already in [0, 1]
-            
+            inds = inds.to(error_map.device)
             # ema update
             ema_error = self.error_map_weight * error_map.gather(1, inds) + (1 - self.error_map_weight) * error
             error_map.scatter_(1, inds, ema_error)
@@ -588,7 +591,7 @@ class Trainer(object):
             data["ray_weights"] = data["ray_weights"][:, ::downsample_factor, ::downsample_factor]
         
     def eval_step(self, data, include_distances=False):
-        self.downsample_data(data, downsample_factor=8, include_distances=include_distances)
+        self.downsample_data(data, downsample_factor=16, include_distances=include_distances)
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
         images = data['images'] # [B, H, W, 3/4]
@@ -690,15 +693,15 @@ class Trainer(object):
                 if eval_train_loader is not None:
                     metrics, loss_dct = self.evaluate_one_epoch(eval_train_loader, save_dir='trainset_validation')
                     dataset.append(loss_dct["rgb_loss"])
-                    wandb_dct["max_trainset_rgb_loss"] = max(loss_dct["rgb_loss"])
+                    wandb_dct[f"view_count_{len(train_loader)}/max_trainset_rgb_loss"] = max(loss_dct["rgb_loss"])
                     for key, value in metrics.items():
-                        wandb_dct[f"trainset_{key}"] = value
+                        wandb_dct[f"view_count_{len(train_loader)}/trainset_{key}"] = value
 
                 metrics, loss_dct = self.evaluate_one_epoch(valid_loader, save_dir='valset_validation')
                 dataset.append(loss_dct["rgb_loss"])
-                wandb_dct["max_valset_rgb_loss"] = max(loss_dct["rgb_loss"])
+                wandb_dct[f"view_count_{len(train_loader)}/max_valset_rgb_loss"] = max(loss_dct["rgb_loss"])
                 for key, value in metrics.items():
-                    wandb_dct[f"valset_{key}"] = value
+                    wandb_dct[f"view_count_{len(train_loader)}/valset_{key}"] = value
 
                 if len(xticklabels) % 4 == 0:
                     xticklabels.extend([f'{self.global_step}', f''])
@@ -709,16 +712,16 @@ class Trainer(object):
                     # assumes dataset[-1] is valset loss and dataset[-2] is trainset loss
                     max_val_loss = max(dataset[-1])
                     max_train_loss = max(dataset[-2])
-                    wandb_dct["max_val_loss ÷ max_train_loss"] = max_val_loss / max_train_loss
+                    wandb_dct[f"view_count_{len(train_loader)}/max_val_loss ÷ max_train_loss"] = max_val_loss / max_train_loss
 
-            if epoch % 50 == 0 and epoch > 0:
                 if eval_train_loader is None:
                     real_xticklabels = xticklabels[::2]
                 else:
                     real_xticklabels = xticklabels
-                title = f"RGB loss vs train steps\n{self.workspace}\ntrainsize{len(train_loader)}"
+                workspace_title = "-".join(self.workspace.split("/"))
+                title = f"RGB loss vs train steps\n{workspace_title}\ntrainsize{len(train_loader)}"
                 fig = plot_distributions(dataset, title=title, xticklabels=real_xticklabels) #, l1_reg=self.opt.l1_reg_weight)
-                wandb_dct["RGB loss vs train steps"] = wandb.Image(fig)
+                wandb_dct[f"view_count_{len(train_loader)}/RGB loss vs train steps"] = wandb.Image(fig)
 
             if use_wandb:
                 wandb.log(wandb_dct, step=self.global_step)
@@ -730,6 +733,7 @@ class Trainer(object):
         self.use_tensorboardX, use_tensorboardX = False, self.use_tensorboardX
         metrics, loss_dct = self.evaluate_one_epoch(loader)
         self.use_tensorboardX = use_tensorboardX
+        return metrics, loss_dct
 
     def test(self, loader, save_path=None, name=None):
 
@@ -1167,6 +1171,7 @@ class Trainer(object):
                     	
             else:	
                 self.log("[WARN] No checkpoint found, model randomly initialized.")
+                return
 
         checkpoint_dict = torch.load(checkpoint, map_location=self.device)
         
