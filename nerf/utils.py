@@ -715,12 +715,12 @@ class Trainer(object):
                     wandb_dct[f"view_count_{len(train_loader)}/max_val_loss ÷ max_train_loss"] = max_val_loss / max_train_loss
 
                 if use_wandb:
-                    if self.epoch != max_epoch:
+                    if self.epoch != max_epochs:
                         wandb.log(wandb_dct, step=self.global_step)
                     else:
                         print(f"[INFO] Accumulate Wandb metrics with violin plot...")
                         
-            if epoch == max_epoch:
+            if epoch == max_epochs:
                 if eval_train_loader is None:
                     real_xticklabels = xticklabels[::2]
                 else:
