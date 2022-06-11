@@ -338,7 +338,7 @@ class Trainer(object):
                  mute=False, # whether to mute all print
                  fp16=False, # amp optimize level
                  eval_interval=1, # eval once every $ epoch
-                 max_keep_ckpt=2, # max num of saved ckpts in disk
+                 max_keep_ckpt=25, # max num of saved ckpts in disk
                  workspace='workspace', # workspace to save logs & ckpts
                  best_mode='min', # the smaller/larger result, the better
                  use_loss_as_metric=True, # use loss as the first metric
@@ -714,6 +714,7 @@ class Trainer(object):
                     max_train_loss = max(dataset[-2])
                     wandb_dct[f"view_count_{len(train_loader)}/max_val_loss ÷ max_train_loss"] = max_val_loss / max_train_loss
 
+            if epoch == max_epoch:
                 if eval_train_loader is None:
                     real_xticklabels = xticklabels[::2]
                 else:
