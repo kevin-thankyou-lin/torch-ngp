@@ -684,7 +684,7 @@ class Trainer(object):
             self.train_one_epoch(train_loader)
 
             if self.workspace is not None and self.local_rank == 0:
-                if not self.save_max_epoch_only and self.epoch % 5 == 0:	
+                if not self.save_max_epoch_only and self.epoch % self.eval_interval == 0:	
                     self.save_checkpoint(full=True, best=False, train_loader_size=len(train_loader))	
                 elif self.save_max_epoch_only and epoch == max_epochs:	
                     self.save_checkpoint(full=True, best=False, train_loader_size=len(train_loader))
@@ -1131,7 +1131,7 @@ class Trainer(object):
 
             state['model'] = self.model.state_dict()
 
-            file_path = f"{self.ckpt_path}/{self.name}_trainsize_{train_loader_size}_ep{self.epoch:04d}.pth.tar"
+            file_path = f"{self.ckpt_path}/{self.name}_trainsize{train_loader_size}_ep{self.epoch:04d}.pth.tar"
 
             if remove_old:
                 self.stats["checkpoints"].append(file_path)
@@ -1173,7 +1173,7 @@ class Trainer(object):
                 epoch = "*"
             else:
                 epoch = f'{epoch:04d}'
-            checkpoint_list = sorted(glob.glob(f'{self.ckpt_path}/{self.name}_trainsize_{train_size}_ep{epoch}.pth.tar'))	
+            checkpoint_list = sorted(glob.glob(f'{self.ckpt_path}/{self.name}_trainsize{train_size}_ep{epoch}.pth.tar'))	
             if checkpoint_list:	
                 if train_size is not None:	
                     checkpoint = checkpoint_list[-1]	
