@@ -338,7 +338,7 @@ class Trainer(object):
                  mute=False, # whether to mute all print
                  fp16=False, # amp optimize level
                  eval_interval=1, # eval once every $ epoch
-                 max_keep_ckpt=25, # max num of saved ckpts in disk
+                 max_keep_ckpt=5, # max num of saved ckpts in disk
                  workspace='workspace', # workspace to save logs & ckpts
                  best_mode='min', # the smaller/larger result, the better
                  use_loss_as_metric=True, # use loss as the first metric
@@ -1165,9 +1165,15 @@ class Trainer(object):
             else:
                 self.log(f"[WARN] no evaluated results found, skip saving best checkpoint.")
             
-    def load_checkpoint(self, checkpoint=None, model_only=False, train_size: int = None):	
+    def load_checkpoint(self, checkpoint=None, model_only=False, train_size: int = None, epoch: int = None):	
         if checkpoint is None:	
-            checkpoint_list = sorted(glob.glob(f'{self.ckpt_path}/{self.name}_ep*.pth.tar'))	
+            if train_size is None:
+                train_size = "*"
+            if epoch is None:
+                epoch = "*"
+            else:
+                epoch = f'{epoch:04d}'
+            checkpoint_list = sorted(glob.glob(f'{self.ckpt_path}/{self.name}_trainsize_{train_size}_ep{epoch}.pth.tar'))	
             if checkpoint_list:	
                 if train_size is not None:	
                     checkpoint = checkpoint_list[-1]	
