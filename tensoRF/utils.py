@@ -26,23 +26,27 @@ class Trainer(_Trainer):
                  use_checkpoint="latest", # which ckpt to use at init time
                  use_tensorboardX=True, # whether to use tensorboard for logging
                  scheduler_update_every_step=False, # whether to call scheduler.step() after every train step
+                 use_depth_supervision=False, # whether to use depth supervision
+                 depth_lambda=None, # depth supervision lambda
+                 save_max_epoch_only: bool = False, # whether to save the final model only
+                 error_map_weight: float = 0.1, # weight of error map in loss
                  ):
 
         self.optimizer_fn = optimizer
         self.lr_scheduler_fn = lr_scheduler
 
-        super().__init__(name, opt, model, criterion, optimizer, ema_decay, lr_scheduler, metrics, local_rank, world_size, device, mute, fp16, eval_interval, max_keep_ckpt, workspace, best_mode, use_loss_as_metric, report_metric_at_train, use_checkpoint, use_tensorboardX, scheduler_update_every_step)
+        super().__init__(name, opt, model, criterion, optimizer, ema_decay, lr_scheduler, metrics, local_rank, world_size, device, mute, fp16, eval_interval, max_keep_ckpt, workspace, best_mode, use_loss_as_metric, report_metric_at_train, use_checkpoint, use_tensorboardX, scheduler_update_every_step, use_depth_supervision, depth_lambda, save_max_epoch_only, error_map_weight)
         
     ### ------------------------------	
 
     def train_step(self, data):
 
-        pred_rgb, gt_rgb, loss = super().train_step(data)
-
+        pred_rgb, gt_rgb, loss, loss_dct = super().train_step(data)
+        density_loss = self.model.density_loss() 
         # l1 reg
-        loss += self.model.density_loss() * self.opt.l1_reg_weight
-
-        return pred_rgb, gt_rgb, loss
+        loss += density_loss * self.opt.l1_reg_weight
+        loss_dct['density_loss'] = density_loss.item()
+        return pred_rgb, gt_rgb, loss, loss_dct
 
 
     def train_one_epoch(self, loader):
@@ -78,7 +82,7 @@ class Trainer(_Trainer):
             self.optimizer.zero_grad()
 
             with torch.cuda.amp.autocast(enabled=self.fp16):
-                preds, truths, loss = self.train_step(data)
+                preds, truths, loss, loss_dct = self.train_step(data)
          
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
@@ -232,72 +236,26 @@ class Trainer(_Trainer):
         return outputs
 
 
-    def save_checkpoint(self, name=None, full=False, best=False, remove_old=True):
 
-        if name is None:
-            name = f'{self.name}_ep{self.epoch:04d}.pth'
-
-        state = {
-            'epoch': self.epoch,
-            'global_step': self.global_step,
-            'stats': self.stats,
-            'resolution': self.model.resolution, # Different from _Trainer!
-        }
-
-        if self.model.cuda_ray:
-            state['mean_count'] = self.model.mean_count
-            state['mean_density'] = self.model.mean_density
-
-        if full:
-            state['optimizer'] = self.optimizer.state_dict()
-            state['lr_scheduler'] = self.lr_scheduler.state_dict()
-            state['scaler'] = self.scaler.state_dict()
-            if self.ema is not None:
-                state['ema'] = self.ema.state_dict()
-        
-        if not best:
-
-            state['model'] = self.model.state_dict()
-
-            file_path = f"{self.ckpt_path}/{name}.pth"
-
-            if remove_old:
-                self.stats["checkpoints"].append(file_path)
-
-                if len(self.stats["checkpoints"]) > self.max_keep_ckpt:
-                    old_ckpt = self.stats["checkpoints"].pop(0)
-                    if os.path.exists(old_ckpt):
-                        os.remove(old_ckpt)
-
-            torch.save(state, file_path)
-
-        else:    
-            if len(self.stats["results"]) > 0:
-                if self.stats["best_result"] is None or self.stats["results"][-1] < self.stats["best_result"]:
-                    self.log(f"[INFO] New best result: {self.stats['best_result']} --> {self.stats['results'][-1]}")
-                    self.stats["best_result"] = self.stats["results"][-1]
-
-                    # save ema results 
-                    if self.ema is not None:
-                        self.ema.store()
-                        self.ema.copy_to()
-
-                    state['model'] = self.model.state_dict()
-
-                    if self.ema is not None:
-                        self.ema.restore()
-                    
-                    torch.save(state, self.best_path)
-            else:
-                self.log(f"[WARN] no evaluated results found, skip saving best checkpoint.")
             
-    def load_checkpoint(self, checkpoint=None, model_only=False):
-        if checkpoint is None:
-            checkpoint_list = sorted(glob.glob(f'{self.ckpt_path}/{self.name}_ep*.pth'))
-            if checkpoint_list:
-                checkpoint = checkpoint_list[-1]
-                self.log(f"[INFO] Latest checkpoint is {checkpoint}")
+	    def load_checkpoint(self, checkpoint=None, model_only=False, train_size: int = None, epoch: int = None):	
+        if checkpoint is None:	
+            if train_size is None:
+                train_size = "*"
+            if epoch is None:
+                epoch = "*"
             else:
+                epoch = f'{epoch:04d}'
+            checkpoint_list = sorted(glob.glob(f'{self.ckpt_path}/{self.name}_trainsize{train_size}_ep{epoch}.pth.tar'))	
+            if checkpoint_list:	
+                if train_size is not None:	
+                    checkpoint = checkpoint_list[-1]	
+                    self.log(f"[INFO] Latest checkpoint is {checkpoint}")	
+                else:	
+                    import ipdb; ipdb.set_trace()	
+                    # get checkpoint with train_size	
+                    	
+            else:	
                 self.log("[WARN] No checkpoint found, model randomly initialized.")
                 return
 

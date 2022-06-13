@@ -39,9 +39,9 @@ if __name__ == '__main__':
     parser.add_argument('--color_space', type=str, default='srgb', help="Color space, supports (linear, srgb)")
     parser.add_argument('--preload', action='store_true', help="preload all data into GPU, accelerate training but use more GPU memory")
     # (the default value is for the fox dataset)
-    parser.add_argument('--bound', type=float, default=2, help="assume the scene is bounded in box[-bound, bound]^3, if > 1, will invoke adaptive ray marching.")
-    parser.add_argument('--scale', type=float, default=0.33, help="scale camera location into box[-bound, bound]^3")
-    parser.add_argument('--dt_gamma', type=float, default=1/128, help="dt_gamma (>=0) for adaptive ray marching. set to 0 to disable, >0 to accelerate rendering (but usually with worse quality)")
+    parser.add_argument('--bound', type=float, default=1.3, help="assume the scene is bounded in box[-bound, bound]^3, if > 1, will invoke adaptive ray marching.")
+    parser.add_argument('--scale', type=float, default=1.0, help="scale camera location into box[-bound, bound]^3")
+    parser.add_argument('--dt_gamma', type=float, default=0, help="dt_gamma (>=0) for adaptive ray marching. set to 0 to disable, >0 to accelerate rendering (but usually with worse quality)")
     parser.add_argument('--min_near', type=float, default=0.2, help="minimum near distance for camera")
     parser.add_argument('--density_thresh', type=float, default=0.01, help="threshold for density grid to be occupied")
     parser.add_argument('--bg_radius', type=float, default=-1, help="if positive, use a background model at sphere(bg_radius)")
@@ -58,6 +58,7 @@ if __name__ == '__main__':
     parser.add_argument('--error_map', action='store_true', help="use error map to sample rays")
     parser.add_argument('--clip_text', type=str, default='', help="text input for CLIP guidance")
     parser.add_argument('--rand_pose', type=int, default=-1, help="<0 uses no rand pose, =0 only uses rand pose, >0 sample one rand pose every $ known poses")
+    parser.add_argument('--max_epoch', type=int, default=200, help="max epochs for training")
 
     opt = parser.parse_args()
 
@@ -115,10 +116,28 @@ if __name__ == '__main__':
 
         train_loader = NeRFDataset(opt, device=device, type='train').dataloader()
 
+	        if opt.use_wandb:	
+            import wandb	
+            name = f"ngp-dtgamma{opt.dt_gamma}-{opt.scheduler}-trainsize{len(train_loader)}"	
+            if opt.scheduler == 'ReduceLROnPlateau':	
+                name += f"-patience{opt.reduce_lr_patience}-redlrfactor{opt.reduce_lr_factor}"	
+            if opt.error_map:	
+                name += "-errmap"	
+                name += f"-errmap_weight{opt.error_map_weight}"	
+                	
+            run = (	
+                wandb.init(	
+                    project="torch-ngp",	
+                    name=name,	
+                    config=opt,	
+                ),	
+            )	
+            wandb.run.log_code(".")
+
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 
-        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=None, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=True, metrics=[PSNRMeter()], use_checkpoint=opt.ckpt, eval_interval=50)
+        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=None, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=True, metrics=[PSNRMeter()], use_checkpoint=opt.ckpt, eval_interval=20)
 
         # calc upsample target resolutions
         upsample_resolutions = (np.round(np.exp(np.linspace(np.log(opt.resolution0), np.log(opt.resolution1), len(opt.upsample_model_steps) + 1)))).astype(np.int32).tolist()[1:]
@@ -132,10 +151,15 @@ if __name__ == '__main__':
             gui.render()
         
         else:
-            valid_loader = NeRFDataset(opt, device=device, type='val', downscale=1).dataloader()
+            eval_train_loader = NeRFDataset(opt, device=device, type='eval_train', downscale=1).dataloader()	
+            import copy	
+            val_opt = copy.deepcopy(opt)	
+            val_opt.path = "/home/guest/code/active-nerf/offline_gym_data/lego"	
+            valid_loader = NeRFDataset(val_opt, device=device, type='val', downscale=1).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
-            trainer.train(train_loader, valid_loader, max_epoch)
+            max_epoch = min(max_epoch, opt.max_epoch)	
+            trainer.train(train_loader, valid_loader, max_epoch, eval_train_loader=eval_train_loader, use_wandb=opt.use_wandb)
 
             # also test
             test_loader = NeRFDataset(opt, device=device, type='test').dataloader()
