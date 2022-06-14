@@ -236,9 +236,7 @@ class Trainer(_Trainer):
         return outputs
 
 
-
-            
-	    def load_checkpoint(self, checkpoint=None, model_only=False, train_size: int = None, epoch: int = None):	
+    def load_checkpoint(self, checkpoint=None, model_only=False, train_size: int = None, epoch: int = None):	
         if checkpoint is None:	
             if train_size is None:
                 train_size = "*"
