@@ -170,7 +170,10 @@ if __name__ == '__main__':
         
         else:
             eval_train_loader = NeRFDataset(opt, device=device, type='eval_train', downscale=1).dataloader()
-            valid_loader = NeRFDataset(opt, device=device, type='val', downscale=1).dataloader()
+            import copy
+            val_opt = copy.deepcopy(opt)
+            val_opt.path = "/home/guest/code/active-nerf/offline_gym_data/lego"
+            valid_loader = NeRFDataset(val_opt, device=device, type='val', downscale=1).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             max_epoch = min(max_epoch, opt.max_epoch)

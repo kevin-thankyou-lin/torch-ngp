@@ -559,13 +559,13 @@ class Trainer(object):
         }
 
         if self.use_depth_supervision:	
+            import ipdb; ipdb.set_trace()
             pred_ray_lengths = outputs['unnormed_expected_depth']	
             inds = data['inds']	
             gt_ray_lengths = data["ray_lengths"].flatten()[inds].flatten()	
             gt_ray_weights = data["ray_weights"].flatten()[inds].flatten()	
             loss_depth = self.criterion(pred_ray_lengths * gt_ray_weights, gt_ray_lengths * gt_ray_weights).mean(-1)
             loss += self.depth_lambda * loss_depth
-            import ipdb; ipdb.set_trace()
             print(f"KL check loss depth shapes")
             loss_dct["depth_loss"] = loss_depth.mean().item()
 
@@ -662,7 +662,7 @@ class Trainer(object):
 
     ### ------------------------------
 
-    def train(self, train_loader, valid_loader, max_epochs, start_epoch=None, eval_train_loader=None, use_wandb=False):
+    def train(self, train_loader, valid_loader, max_epochs, start_epoch=None, eval_train_loader=None, use_wandb=False, active_train_last_data_iters=0, violin_plot: bool = False):
         dataset, xticklabels = [], []
         wandb_dct = {}
         if self.use_tensorboardX and self.local_rank == 0:
@@ -677,7 +677,9 @@ class Trainer(object):
 
         # get a ref to error_map
         self.error_map = train_loader._data.error_map
-        
+
+        self.train_last_data_only(train_loader, num_iters=active_train_last_data_iters)
+
         for epoch in range(self.epoch, max_epochs + 1):
             self.epoch = epoch
 
@@ -715,12 +717,12 @@ class Trainer(object):
                     wandb_dct[f"view_count_{len(train_loader)}/max_val_loss ÷ max_train_loss"] = max_val_loss / max_train_loss
 
                 if use_wandb:
-                    if self.epoch != max_epochs:
+                    if self.epoch != max_epochs or not violin_plot:
                         wandb.log(wandb_dct, step=self.global_step)
                     else:
                         print(f"[INFO] Accumulate Wandb metrics with violin plot...")
                         
-            if epoch == max_epochs:
+            if epoch == max_epochs and violin_plot:
                 if eval_train_loader is None:
                     real_xticklabels = xticklabels[::2]
                 else:
@@ -900,6 +902,72 @@ class Trainer(object):
         }
 
         return outputs
+
+    def train_last_data_only(self, loader, num_iters=0):
+        """
+        Active data selection: train on the last batch of data only for num_iters.
+        """
+        total_loss = 0
+        self.local_step = 0
+
+        self.model.train()
+
+        if self.local_rank == 0:
+            pbar = tqdm.tqdm(total=num_iters, bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+
+        for i in range(num_iters):
+            data = loader.collate_fn([-1])
+
+            # update grid every 16 steps	
+            if self.model.cuda_ray and self.global_step % 16 == 0:	
+                with torch.cuda.amp.autocast(enabled=self.fp16):	
+                    self.model.update_extra_state()	
+                        
+            self.local_step += 1
+            self.global_step += 1
+
+            self.optimizer.zero_grad()
+
+            with torch.cuda.amp.autocast(enabled=self.fp16):
+                preds, truths, loss, loss_dct = self.train_step(data)
+            
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            loss_val = loss.item()
+            print(f'loss: {loss_val}')
+            total_loss += loss_val
+
+            if self.local_rank == 0:
+                if self.report_metric_at_train:
+                    for metric in self.metrics:
+                        metric.update(preds, truths)
+                        
+                if self.use_tensorboardX:
+                    self.writer.add_scalar("train/loss", loss_val, self.global_step)
+                    self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]['lr'], self.global_step)
+
+                if self.scheduler_update_every_step:
+                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f}), lr={self.optimizer.param_groups[0]['lr']:.6f}")
+                else:
+                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f})")
+                pbar.update(loader.batch_size)
+
+        if num_iters > 0:
+            average_loss = total_loss / self.local_step
+            self.stats["loss"].append(average_loss)
+
+            if self.local_rank == 0:
+                pbar.close()
+                if self.report_metric_at_train:
+                    for metric in self.metrics:
+                        self.log(metric.report(), style="red")
+                        if self.use_tensorboardX:
+                            metric.write(self.writer, self.epoch, prefix="train")
+                        metric.clear()
+
+            self.log(f"==> Finished active training on latest data for num_iters {num_iters}.")
 
     def train_one_epoch(self, loader):
         self.log(f"==> Start Training Epoch {self.epoch}, lr={self.optimizer.param_groups[0]['lr']:.6f} ...")
