@@ -662,7 +662,7 @@ class Trainer(object):
 
     ### ------------------------------
 
-    def train(self, train_loader, valid_loader, max_epochs, start_epoch=None, eval_train_loader=None, use_wandb=False, active_train_last_data_iters=0, violin_plot: bool = False):
+    def train(self, train_loader, valid_loader, max_epochs, start_epoch=None, eval_train_loader=None, use_wandb=False, active_train_last_data_iters=0, plot_violin_plot: bool = False):
         dataset, xticklabels = [], []
         wandb_dct = {}
         if self.use_tensorboardX and self.local_rank == 0:
@@ -717,12 +717,12 @@ class Trainer(object):
                     wandb_dct[f"view_count_{len(train_loader)}/max_val_loss ÷ max_train_loss"] = max_val_loss / max_train_loss
 
                 if use_wandb:
-                    if self.epoch != max_epochs or not violin_plot:
+                    if self.epoch != max_epochs or not plot_violin_plot:
                         wandb.log(wandb_dct, step=self.global_step)
                     else:
                         print(f"[INFO] Accumulate Wandb metrics with violin plot...")
                         
-            if epoch == max_epochs and violin_plot:
+            if epoch == max_epochs and plot_violin_plot:
                 if eval_train_loader is None:
                     real_xticklabels = xticklabels[::2]
                 else:
