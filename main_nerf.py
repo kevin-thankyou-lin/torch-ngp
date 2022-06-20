@@ -27,13 +27,14 @@ if __name__ == '__main__':
     parser.add_argument('--ckpt', type=str, default='latest')
     parser.add_argument('--num_rays', type=int, default=4096, help="num rays sampled per image for each training step")
     parser.add_argument('--cuda_ray', action='store_true', help="use CUDA raymarching instead of pytorch")
-    parser.add_argument('--num_steps', type=int, default=512, help="num steps sampled per ray (only valid when not using --cuda_ray)")
-    parser.add_argument('--upsample_steps', type=int, default=0, help="num steps up-sampled per ray (only valid when not using --cuda_ray)")
-    parser.add_argument('--max_ray_batch', type=int, default=4096, help="batch size of rays at inference to avoid OOM (only valid when not using --cuda_ray)")
     parser.add_argument('--scheduler', type=str, choices=['LambdaLR', 'ReduceLROnPlateau'], default='LambdaLR', help="use error map to sample rays")
     parser.add_argument('--reduce_lr_patience', type=int, default=10, help="patience value for ReduceLROnPlateau scheduler")
     parser.add_argument('--reduce_lr_factor', type=float, default=0.9, help="factor value for ReduceLROnPlateau scheduler")
     parser.add_argument('--max_epoch', type=int, default=100, help="max epochs for training")
+    parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
+    parser.add_argument('--num_steps', type=int, default=512, help="num steps sampled per ray (only valid when NOT using --cuda_ray)")
+    parser.add_argument('--upsample_steps', type=int, default=0, help="num steps up-sampled per ray (only valid when NOT using --cuda_ray)")
+    parser.add_argument('--max_ray_batch', type=int, default=4096, help="batch size of rays at inference to avoid OOM (only valid when NOT using --cuda_ray)")
 
     ### network backbone options
     parser.add_argument('--fp16', action='store_true', help="use amp mixed precision training")
@@ -49,7 +50,7 @@ if __name__ == '__main__':
     parser.add_argument('--scale', type=float, default=0.33, help="scale camera location into box[-bound, bound]^3")
     parser.add_argument('--dt_gamma', type=float, default=1/128, help="dt_gamma (>=0) for adaptive ray marching. set to 0 to disable, >0 to accelerate rendering (but usually with worse quality)")
     parser.add_argument('--min_near', type=float, default=0.2, help="minimum near distance for camera")
-    parser.add_argument('--density_thresh', type=float, default=0.01, help="threshold for density grid to be occupied")
+    parser.add_argument('--density_thresh', type=float, default=10, help="threshold for density grid to be occupied")
     parser.add_argument('--bg_radius', type=float, default=-1, help="if positive, use a background model at sphere(bg_radius)")
 
     ### GUI options
@@ -94,7 +95,7 @@ if __name__ == '__main__':
         encoding="hashgrid",
         bound=opt.bound,
         cuda_ray=opt.cuda_ray,
-        density_scale=0.5,
+        density_scale=1,
         min_near=opt.min_near,
         density_thresh=opt.density_thresh,
         bg_radius=opt.bg_radius,

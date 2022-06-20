@@ -252,7 +252,7 @@ class PSNRMeter:
         preds, truths = self.prepare_inputs(preds, truths) # [B, N, 3] or [B, H, W, 3], range[0, 1]
           
         # simplified since max_pixel_value is 1 here.
-        psnr = -10 * np.log10(np.mean(np.power(preds - truths, 2)))
+        psnr = -10 * np.log10(np.mean((preds - truths) ** 2))
         
         self.V += psnr
         self.N += 1
@@ -506,10 +506,10 @@ class Trainer(object):
 
         if self.opt.color_space == 'linear':
             images[..., :3] = srgb_to_linear(images[..., :3])
-    
-        if self.model.bg_radius > 0:
+
+        if C == 3 or self.model.bg_radius > 0:
             bg_color = 1
-        # train with random background color if not using a bg model.
+        # train with random background color if not using a bg model and has alpha channel.
         else:
             bg_color = torch.ones(3, device=self.device) # [3], fixed white background
             #bg_color = torch.rand(3, device=self.device) # [3], frame-wise random.

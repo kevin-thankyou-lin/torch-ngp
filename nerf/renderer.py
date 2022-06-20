@@ -208,12 +208,11 @@ class NeRFRenderer(nn.Module):
         alphas_shifted = torch.cat([torch.ones_like(alphas[..., :1]), 1 - alphas + 1e-15], dim=-1) # [N, T+t+1]
         weights = alphas * torch.cumprod(alphas_shifted, dim=-1)[..., :-1] # [N, T+t]
 
-        mask = weights > 1e-4 # hard coded
-
         dirs = rays_d.view(-1, 1, 3).expand_as(xyzs)
         for k, v in density_outputs.items():
             density_outputs[k] = v.view(-1, v.shape[-1])
 
+        mask = weights > 1e-4 # hard coded
         rgbs = self.color(xyzs.reshape(-1, 3), dirs.reshape(-1, 3), mask=mask.reshape(-1), **density_outputs)
         rgbs = rgbs.view(N, -1, 3) # [N, T+t, 3]
 
@@ -344,7 +343,7 @@ class NeRFRenderer(nn.Module):
 
             step = 0
             i = 0
-            while step < 1024: # hard coded max step
+            while step < max_steps:
 
                 # count alive rays 
                 if step == 0:
@@ -493,16 +492,14 @@ class NeRFRenderer(nn.Module):
                             cas_xyzs += (torch.rand_like(cas_xyzs) * 2 - 1) * half_grid_size
                             # query density
                             sigmas = self.density(cas_xyzs)['sigma'].reshape(-1).detach()
-                            # from `scalbnf(MIN_CONE_STEPSIZE(), 0)`, check `splat_grid_samples_nerf_max_nearest_neighbor`
-                            # scale == 2 * sqrt(3) / 1024
-                            sigmas *= self.density_scale * 0.003383
+                            sigmas *= self.density_scale
                             # assign 
                             tmp_grid[cas, indices] = sigmas
 
         # partial update (half the computation)
         # TODO: why no need of maxpool ?
         else:
-            N = self.grid_size ** 3 // 4 # H * H * H / 2
+            N = self.grid_size ** 3 // 4 # H * H * H / 4
             for cas in range(self.cascade):
                 # random sample some positions
                 coords = torch.randint(0, self.grid_size, (N, 3), device=self.density_grid.device) # [N, 3], in [0, 128)
@@ -525,16 +522,19 @@ class NeRFRenderer(nn.Module):
                 cas_xyzs += (torch.rand_like(cas_xyzs) * 2 - 1) * half_grid_size
                 # query density
                 sigmas = self.density(cas_xyzs)['sigma'].reshape(-1).detach()
-                # from `scalbnf(MIN_CONE_STEPSIZE(), 0)`, check `splat_grid_samples_nerf_max_nearest_neighbor`
-                # scale == 2 * sqrt(3) / 1024
-                sigmas *= self.density_scale * 0.003383
+                sigmas *= self.density_scale
                 # assign 
                 tmp_grid[cas, indices] = sigmas
+
+        ## max-pool on tmp_grid for less aggressive culling [No significant improvement...]
+        # invalid_mask = tmp_grid < 0
+        # tmp_grid = F.max_pool3d(tmp_grid.view(self.cascade, 1, self.grid_size, self.grid_size, self.grid_size), kernel_size=3, stride=1, padding=1).view(self.cascade, -1)
+        # tmp_grid[invalid_mask] = -1
 
         # ema update
         valid_mask = (self.density_grid >= 0) & (tmp_grid >= 0)
         self.density_grid[valid_mask] = torch.maximum(self.density_grid[valid_mask] * decay, tmp_grid[valid_mask])
-        self.mean_density = torch.mean(self.density_grid.clamp(min=0)).item()
+        self.mean_density = torch.mean(self.density_grid.clamp(min=0)).item() # -1 non-training regions are viewed as 0 density.
         self.iter_density += 1
 
         # convert to bitfield
