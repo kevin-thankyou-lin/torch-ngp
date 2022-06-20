@@ -66,6 +66,7 @@ if __name__ == '__main__':
     parser.add_argument('--rand_pose', type=int, default=-1, help="<0 uses no rand pose, =0 only uses rand pose, >0 sample one rand pose every $ known poses")
     parser.add_argument('--use_wandb', '-w', action='store_true', help="use error map to sample rays")
     parser.add_argument('--error_map_weight', type=float, default=0.1, help="weight for current error value in error map")
+    parser.add_argument('--active_train_last_data_iters', type=float, default=0, help="threshold for error map")
 
     opt = parser.parse_args()
 
@@ -160,7 +161,7 @@ if __name__ == '__main__':
         else:
             raise ValueError(f"unknown scheduler {opt.scheduler}")
 
-        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=scheduler_update_every_step, metrics=[PSNRMeter()], use_checkpoint=opt.ckpt, eval_interval=20)
+        trainer = Trainer('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=scheduler_update_every_step, metrics=[PSNRMeter(), DistanceLossMeter()], use_checkpoint=opt.ckpt, eval_interval=20)
 
         if opt.gui:
             trainer.train_loader = train_loader # attach dataloader to trainer
@@ -170,14 +171,11 @@ if __name__ == '__main__':
         
         else:
             eval_train_loader = NeRFDataset(opt, device=device, type='eval_train', downscale=1).dataloader()
-            import copy
-            val_opt = copy.deepcopy(opt)
-            val_opt.path = "/home/guest/code/active-nerf/offline_gym_data/lego"
-            valid_loader = NeRFDataset(val_opt, device=device, type='val', downscale=1).dataloader()
+            valid_loader = NeRFDataset(opt, device=device, type='val', downscale=1).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             max_epoch = min(max_epoch, opt.max_epoch)
-            trainer.train(train_loader, valid_loader, max_epoch, eval_train_loader=eval_train_loader, use_wandb=opt.use_wandb)
+            trainer.train(train_loader, valid_loader, max_epoch, eval_train_loader=eval_train_loader, use_wandb=opt.use_wandb, active_train_last_data_iters=opt.active_train_last_data_iters)
 
             # also test
             test_loader = NeRFDataset(opt, device=device, type='test').dataloader()
