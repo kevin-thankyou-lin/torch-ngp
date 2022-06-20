@@ -5,6 +5,7 @@ import json
 import tqdm
 import numpy as np
 from scipy.spatial.transform import Slerp, Rotation
+import imageio
 
 import trimesh
 
@@ -114,7 +115,7 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
 
 
 class NeRFDataset:
-    def __init__(self, opt, device, type='train', downscale=1, n_test=10):
+    def __init__(self, opt, device, type='train', downscale=1, n_test=10, error_map=None):
         super().__init__()
         
         self.opt = opt
@@ -180,6 +181,7 @@ class NeRFDataset:
         frames = transform["frames"]
         #frames = sorted(frames, key=lambda d: d['file_path']) # why do I sort...
         
+        self.return_ray_info = 'distance_path' in frames[0].keys() 
         # for colmap, manually interpolate a test set.
         if self.mode == 'colmap' and type == 'test':
             
@@ -192,6 +194,7 @@ class NeRFDataset:
 
             self.poses = []
             self.images = None
+            self.ray_lengths = None
             for i in range(n_test + 1):
                 ratio = np.sin(((i / n_test) - 0.5) * np.pi) * 0.5 + 0.5
                 pose = np.eye(4, dtype=np.float32)
@@ -209,14 +212,28 @@ class NeRFDataset:
                 # else 'all' or 'trainval' : use all frames
             # if self.mode == 'blender':
             #     if type == 'train' or type == 'eval_train':
-            #         frames = frames[::10]
+                    # frames = frames[::10]
+                    # frames = frames[:1]
             
             self.poses = []
             self.images = []
+            if self.return_ray_info:
+                self.ray_lengths = []
+                self.ray_weights = []
+            else:
+                self.ray_lengths = None
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data:'):
                 f_path = os.path.join(self.root_path, f['file_path'])
                 if self.mode == 'blender' and f_path[-4:] != '.png':
                     f_path += '.png' # so silly...
+
+                if self.return_ray_info:
+                    distance_path = os.path.join(self.root_path, f['distance_path'])
+                    distance = ray_lengths = imageio.imread(distance_path)
+                    ray_weights = np.ones_like(distance)
+                    ray_weights[distance == 0] = 0  # do not supervise inf distance rays
+                    self.ray_lengths.append(ray_lengths)
+                    self.ray_weights.append(ray_weights)
 
                 # there are non-exist paths in fox...
                 if not os.path.exists(f_path):
@@ -245,6 +262,9 @@ class NeRFDataset:
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.images is not None:
             self.images = torch.from_numpy(np.stack(self.images, axis=0)) # [N, H, W, C]
+        if self.return_ray_info:
+            self.ray_lengths = torch.from_numpy(np.stack(self.ray_lengths, axis=0))
+            self.ray_weights = torch.from_numpy(np.stack(self.ray_weights, axis=0))
         
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
@@ -273,6 +293,9 @@ class NeRFDataset:
                 self.images = self.images.to(dtype).to(self.device)
             if self.error_map is not None:
                 self.error_map = self.error_map.to(self.device)
+            if self.self.return_ray_info:
+                self.ray_lengths = self.ray_lengths.to(self.device)
+                self.ray_weights = self.ray_weights.to(self.device)
 
         # load intrinsics
         if 'fl_x' in transform or 'fl_y' in transform:
@@ -319,13 +342,18 @@ class NeRFDataset:
         error_map = None if self.error_map is None else self.error_map[index]
         
         rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map)
-        
+
         results = {
             'H': self.H,
             'W': self.W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
         }
+
+        if self.return_ray_info:
+            results['ray_lengths'] = ray_lengths.flatten()[rays['inds']]
+            results['ray_weights'] = ray_weights.flatten()[rays['inds']]
+            results['inds'] = rays['inds']
 
         if self.images is not None:
             images = self.images[index].to(self.device) # [B, H, W, 3/4]
