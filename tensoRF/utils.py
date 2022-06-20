@@ -239,54 +239,7 @@ class Trainer(_Trainer):
         return outputs
 
 
-    def save_checkpoint(self, name=None, full=False, best=False, remove_old=True):
-
-        if name is None:
-            name = f'{self.name}_ep{self.epoch:04d}.pth'
-
-        state = {
-            'epoch': self.epoch,
-            'global_step': self.global_step,
-            'stats': self.stats,
-            'resolution': self.model.resolution, # Different from _Trainer!
-        }
-
-        # special case for CCNeRF...
-        if isinstance(self.model, CCNeRF):
-            state['rank_vec_density'] = self.model.rank_vec_density[0]
-            state['rank_mat_density'] = self.model.rank_mat_density[0]
-            state['rank_vec'] = self.model.rank_vec[0]
-            state['rank_mat'] = self.model.rank_mat[0]
-
-        if self.model.cuda_ray:
-            state['mean_count'] = self.model.mean_count
-            state['mean_density'] = self.model.mean_density
-
-        if full:
-            state['optimizer'] = self.optimizer.state_dict()
-            state['lr_scheduler'] = self.lr_scheduler.state_dict()
-            state['scaler'] = self.scaler.state_dict()
-            if self.ema is not None:
-                state['ema'] = self.ema.state_dict()
-        
-        if not best:
-
-            state['model'] = self.model.state_dict()
-
-            file_path = f"{self.ckpt_path}/{name}.pth"
-
-            if remove_old:
-                self.stats["checkpoints"].append(file_path)
-
-                if len(self.stats["checkpoints"]) > self.max_keep_ckpt:
-                    old_ckpt = self.stats["checkpoints"].pop(0)
-                    if os.path.exists(old_ckpt):
-                        os.remove(old_ckpt)
-
-            torch.save(state, file_path)
-
-            
-	    def load_checkpoint(self, checkpoint=None, model_only=False, train_size: int = None, epoch: int = None):	
+    def load_checkpoint(self, checkpoint=None, model_only=False, train_size: int = None, epoch: int = None):	
         if checkpoint is None:	
             if train_size is None:
                 train_size = "*"
