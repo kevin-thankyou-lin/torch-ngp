@@ -105,6 +105,7 @@ def get_rays(poses, intrinsics, H, W, N=-1, error_map=None):
 
     else:
         inds = torch.arange(H*W, device=device).expand([B, H*W])
+        results['inds'] = inds
 
     zs = torch.ones_like(i)
     xs = (i - cx) / fx * zs
@@ -510,9 +511,9 @@ class Trainer(object):
             bg_color = 1
         # train with random background color if not using a bg model.
         else:
-            #bg_color = torch.ones(3, device=self.device) # [3], fixed white background
+            bg_color = torch.ones(3, device=self.device) # [3], fixed white background
             #bg_color = torch.rand(3, device=self.device) # [3], frame-wise random.
-            bg_color = torch.rand_like(images[..., :3]) # [N, 3], pixel-wise random.
+            # bg_color = torch.rand_like(images[..., :3]) # [N, 3], pixel-wise random.
 
         if C == 4:
             gt_rgb = images[..., :3] * images[..., 3:] + bg_color * (1 - images[..., 3:])
@@ -560,7 +561,7 @@ class Trainer(object):
 
         if self.use_depth_supervision:	
             import ipdb; ipdb.set_trace()
-            pred_ray_lengths = outputs['unnormed_expected_depth']	
+            pred_ray_lengths = outputs['unnormed_depth']	
             inds = data['inds']	
             gt_ray_lengths = data["ray_lengths"].flatten()[inds].flatten()	
             gt_ray_weights = data["ray_weights"].flatten()[inds].flatten()	
@@ -587,11 +588,18 @@ class Trainer(object):
         data['rays_d'] = data['rays_d'].reshape(B, -1, C)
         
         if include_distances:
+            data['ray_lengths'] = data['ray_lengths'].reshape(B, H, W)
+            data['ray_weights'] = data['ray_weights'].reshape(B, H, W)
+
             data["ray_lengths"] = data["ray_lengths"][:, ::downsample_factor, ::downsample_factor]
             data["ray_weights"] = data["ray_weights"][:, ::downsample_factor, ::downsample_factor]
-        
+
+            data['ray_lengths'] = data['ray_lengths'].reshape(B, -1)
+            data['ray_weights'] = data['ray_weights'].reshape(B, -1)
+
+
     def eval_step(self, data, include_distances=False):
-        self.downsample_data(data, downsample_factor=16, include_distances=include_distances)
+        self.downsample_data(data, downsample_factor=1, include_distances=include_distances)
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
         images = data['images'] # [B, H, W, 3/4]
@@ -613,11 +621,16 @@ class Trainer(object):
         pred_depth = outputs['depth'].reshape(B, H, W)
 
         loss = self.criterion(pred_rgb, gt_rgb).mean()
-
-        loss = self.criterion(pred_rgb, gt_rgb).mean()
         loss_dct = {
             "rgb_loss": loss.item(),
         }
+
+        if include_distances:
+            pred_ray_lengths = outputs['unnormed_depth']
+            inds = data['inds']
+            gt_ray_lengths = data["ray_lengths"].flatten()[inds]
+            gt_ray_weights = data["ray_weights"].flatten()[inds]
+            return pred_rgb, pred_depth, gt_rgb, loss, loss_dct, pred_ray_lengths, gt_ray_lengths, gt_ray_weights
         return pred_rgb, pred_depth, gt_rgb, loss, loss_dct
 
     # moved out bg_color and perturb for more flexible control...

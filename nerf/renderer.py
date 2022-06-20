@@ -225,6 +225,7 @@ class NeRFRenderer(nn.Module):
         # calculate depth 
         ori_z_vals = ((z_vals - nears) / (fars - nears)).clamp(0, 1)
         depth = torch.sum(weights * ori_z_vals, dim=-1)
+        unnormed_depth = torch.sum(weights * z_vals, dim=-1)
 
         # calculate color
         image = torch.sum(weights.unsqueeze(-1) * rgbs, dim=-2) # [N, 3], in [0, 1]
@@ -236,11 +237,12 @@ class NeRFRenderer(nn.Module):
             bg_color = self.background(polar, rays_d.reshape(-1, 3)) # [N, 3]
         elif bg_color is None:
             bg_color = 1
-            
+
         image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
 
         image = image.view(*prefix, 3)
         depth = depth.view(*prefix)
+        unnormed_depth = unnormed_depth.view(*prefix)
 
         # tmp: reg loss in mip-nerf 360
         # z_vals_shifted = torch.cat([z_vals[..., 1:], sample_dist * torch.ones_like(z_vals[..., :1])], dim=-1)
@@ -250,6 +252,7 @@ class NeRFRenderer(nn.Module):
         return {
             'depth': depth,
             'image': image,
+            'unnormed_depth': unnormed_depth
         }
 
 
@@ -298,19 +301,23 @@ class NeRFRenderer(nn.Module):
                 K = sigmas.shape[0]
                 depths = []
                 images = []
+                unnormed_depths = []
                 for k in range(K):
                     weights_sum, depth, image = raymarching.composite_rays_train(sigmas[k], rgbs[k], deltas, rays)
+                    unnormed_depth = depth.view(*prefix)
                     image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
                     depth = torch.clamp(depth - nears, min=0) / (fars - nears)
                     images.append(image.view(*prefix, 3))
                     depths.append(depth.view(*prefix))
+                    unnormed_depths.append(unnormed_depth.view(*prefix))
             
+                unnormed_depth = torch.stack(unnormed_depths, axis=0)
                 depth = torch.stack(depths, axis=0) # [K, B, N]
                 image = torch.stack(images, axis=0) # [K, B, N, 3]
 
             else:
-
                 weights_sum, depth, image = raymarching.composite_rays_train(sigmas, rgbs, deltas, rays)
+                unnormed_depth = depth.view(*prefix)
                 image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
                 depth = torch.clamp(depth - nears, min=0) / (fars - nears)
                 image = image.view(*prefix, 3)
@@ -327,6 +334,7 @@ class NeRFRenderer(nn.Module):
             weights_sum = torch.zeros(N, dtype=dtype, device=device)
             depth = torch.zeros(N, dtype=dtype, device=device)
             image = torch.zeros(N, 3, dtype=dtype, device=device)
+            unnormed_depth = torch.zeros(N, dtype=dtype, device=device)
             
             n_alive = N
             alive_counter = torch.zeros([1], dtype=torch.int32, device=device)
@@ -370,6 +378,7 @@ class NeRFRenderer(nn.Module):
                 step += n_step
                 i += 1
 
+            unnormed_depth = depth.view(*prefix)
             image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
             depth = torch.clamp(depth - nears, min=0) / (fars - nears)
             image = image.view(*prefix, 3)
@@ -378,6 +387,7 @@ class NeRFRenderer(nn.Module):
         return {
             'depth': depth,
             'image': image,
+            'unnormed_depth': unnormed_depth,
         }
 
     @torch.no_grad()
