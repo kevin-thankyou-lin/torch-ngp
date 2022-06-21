@@ -214,7 +214,7 @@ class NeRFDataset:
             #     if type == 'train' or type == 'eval_train':
                     # frames = frames[::10]
                     # frames = frames[:1]
-            
+
             self.poses = []
             self.images = []
             if self.return_ray_info:
@@ -295,7 +295,7 @@ class NeRFDataset:
                 self.images = self.images.to(dtype).to(self.device)
             if self.error_map is not None:
                 self.error_map = self.error_map.to(self.device)
-            if self.self.return_ray_info:
+            if self.return_ray_info:
                 self.ray_lengths = self.ray_lengths.to(self.device)
                 self.ray_weights = self.ray_weights.to(self.device)
 
@@ -353,6 +353,8 @@ class NeRFDataset:
         }
 
         if self.return_ray_info:
+            ray_lengths = self.ray_lengths[index]
+            ray_weights = self.ray_weights[index]
             results['ray_lengths'] = ray_lengths.flatten()[rays['inds']]
             results['ray_weights'] = ray_weights.flatten()[rays['inds']]
             results['inds'] = rays['inds']
