@@ -587,6 +587,10 @@ class Trainer(object):
         data['rays_o'] = data['rays_o'].reshape(B, -1, C)
         data['rays_d'] = data['rays_d'].reshape(B, -1, C)
         
+        data['inds'] = data['inds'].reshape(B, H, W)
+        data["inds"] = data["inds"][:, ::downsample_factor, ::downsample_factor]
+        data['inds'] = data['inds'].reshape(B, -1)
+
         if include_distances:
             data['ray_lengths'] = data['ray_lengths'].reshape(B, H, W)
             data['ray_weights'] = data['ray_weights'].reshape(B, H, W)
@@ -628,8 +632,8 @@ class Trainer(object):
         if include_distances:
             pred_ray_lengths = outputs['unnormed_depth']
             inds = data['inds']
-            gt_ray_lengths = data["ray_lengths"].flatten()[inds]
-            gt_ray_weights = data["ray_weights"].flatten()[inds]
+            gt_ray_lengths = data["ray_lengths"]
+            gt_ray_weights = data["ray_weights"]
             return pred_rgb, pred_depth, gt_rgb, loss, loss_dct, pred_ray_lengths, gt_ray_lengths, gt_ray_weights
         return pred_rgb, pred_depth, gt_rgb, loss, loss_dct
 
