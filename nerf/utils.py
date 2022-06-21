@@ -599,7 +599,7 @@ class Trainer(object):
 
 
     def eval_step(self, data, include_distances=False):
-        self.downsample_data(data, downsample_factor=1, include_distances=include_distances)
+        self.downsample_data(data, downsample_factor=16, include_distances=include_distances)
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
         images = data['images'] # [B, H, W, 3/4]

@@ -353,8 +353,8 @@ class NeRFDataset:
         }
 
         if self.return_ray_info:
-            ray_lengths = self.ray_lengths[index]
-            ray_weights = self.ray_weights[index]
+            ray_lengths = self.ray_lengths[index].to(self.device)
+            ray_weights = self.ray_weights[index].to(self.device)
             results['ray_lengths'] = ray_lengths.flatten()[rays['inds']]
             results['ray_weights'] = ray_weights.flatten()[rays['inds']]
             results['inds'] = rays['inds']
