@@ -586,12 +586,12 @@ class Trainer(object):
 
         data['rays_o'] = data['rays_o'].reshape(B, -1, C)
         data['rays_d'] = data['rays_d'].reshape(B, -1, C)
-        
-        data['inds'] = data['inds'].reshape(B, H, W)
-        data["inds"] = data["inds"][:, ::downsample_factor, ::downsample_factor]
-        data['inds'] = data['inds'].reshape(B, -1)
 
         if include_distances:
+            data['inds'] = data['inds'].reshape(B, H, W)
+            data["inds"] = data["inds"][:, ::downsample_factor, ::downsample_factor]
+            data['inds'] = data['inds'].reshape(B, -1)
+
             data['ray_lengths'] = data['ray_lengths'].reshape(B, H, W)
             data['ray_weights'] = data['ray_weights'].reshape(B, H, W)
 
